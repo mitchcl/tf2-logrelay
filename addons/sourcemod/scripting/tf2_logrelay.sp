@@ -97,8 +97,84 @@ public void OnPluginStart()
     g_hSocket = SocketCreate(SOCKET_UDP, OnSocketError);
 
     AddGameLogHook(OnGameLog);
+
+    RegServerCmd("logrelay_add", Cmd_Add, "logrelay_add <host> <port> <key> - add/update a recipient");
+    RegServerCmd("logrelay_remove", Cmd_Remove, "logrelay_remove <host> <port> - remove a recipient");
+    RegServerCmd("logrelay_list", Cmd_List, "logrelay_list - list recipients");
+    RegServerCmd("logrelay_clear", Cmd_Clear, "logrelay_clear - remove all config recipients");
+    RegServerCmd("logrelay_reload", Cmd_Reload, "logrelay_reload - reload recipients from cvars + config");
+
     AutoExecConfig(true, "tf2_logrelay");
     CreateTimer(3.0, Timer_Startup);
+}
+
+public Action Cmd_Add(int args)
+{
+    char addr[280], key[129];
+    GetCmdArg(1, addr, sizeof addr);
+    GetCmdArg(2, key, sizeof key);
+    char host[256];
+    int port;
+    if (args < 2 || !SplitAddr(addr, host, sizeof host, port) || key[0] == '\0')
+    {
+        PrintToServer("[logrelay] usage: logrelay_add <ip:port> <key>");
+        return Plugin_Handled;
+    }
+    PersistRecipient(host, port, key);
+    LoadRecipients();
+    PrintToServer("[logrelay] added %s:%d (%d recipient(s))", host, port, g_RecipientCount);
+    return Plugin_Handled;
+}
+
+public Action Cmd_Remove(int args)
+{
+    char addr[280];
+    GetCmdArg(1, addr, sizeof addr);
+    char host[256];
+    int port;
+    if (args < 1 || !SplitAddr(addr, host, sizeof host, port))
+    {
+        PrintToServer("[logrelay] usage: logrelay_remove <ip:port>");
+        return Plugin_Handled;
+    }
+    bool found = RemovePersistedRecipient(host, port);
+    LoadRecipients();
+    PrintToServer("[logrelay] %s %s:%d (%d recipient(s))", found ? "removed" : "not found", host, port, g_RecipientCount);
+    return Plugin_Handled;
+}
+
+bool SplitAddr(const char[] addr, char[] host, int hostlen, int &port)
+{
+    int c = FindCharInString(addr, ':', true);
+    if (c <= 0)
+        return false;
+    strcopy(host, hostlen, addr);
+    host[c] = '\0';
+    port = StringToInt(addr[c + 1]);
+    return host[0] != '\0' && port > 0 && port <= 65535;
+}
+
+public Action Cmd_List(int args)
+{
+    PrintToServer("[logrelay] %d recipient(s):", g_RecipientCount);
+    for (int r = 0; r < g_RecipientCount; r++)
+        PrintToServer("  %s:%d", g_Recipients[r].host, g_Recipients[r].port);
+    return Plugin_Handled;
+}
+
+public Action Cmd_Clear(int args)
+{
+    ClearPersistedRecipients();
+    LoadRecipients();
+    PrintToServer("[logrelay] cleared config recipients (%d recipient(s))", g_RecipientCount);
+    return Plugin_Handled;
+}
+
+public Action Cmd_Reload(int args)
+{
+    LoadRecipients();
+    PrintToServer("[logrelay] reloaded (%d recipient(s))", g_RecipientCount);
+    return Plugin_Handled;
 }
 
 // Announce the map once after the cfg has applied, so a source appears on an idle server too.
@@ -179,10 +255,66 @@ void AddRecipient(const char[] host, int port, const char[] key)
 {
     if (g_RecipientCount >= MAX_RECIPIENTS)
         return;
+    for (int i = 0; i < g_RecipientCount; i++)
+        if (g_Recipients[i].port == port && StrEqual(g_Recipients[i].host, host))
+            return;
     strcopy(g_Recipients[g_RecipientCount].host, 256, host);
     g_Recipients[g_RecipientCount].port = port;
     strcopy(g_Recipients[g_RecipientCount].key, 129, key);
     g_RecipientCount++;
+}
+
+void RecipientsPath(char[] path, int maxlen)
+{
+    BuildPath(Path_SM, path, maxlen, "configs/tf2_logrelay_recipients.cfg");
+}
+
+void PersistRecipient(const char[] host, int port, const char[] key)
+{
+    char path[PLATFORM_MAX_PATH];
+    RecipientsPath(path, sizeof path);
+    KeyValues kv = new KeyValues("Recipients");
+    kv.ImportFromFile(path);
+    char section[320];
+    Format(section, sizeof section, "%s:%d", host, port);
+    kv.JumpToKey(section, true);
+    kv.SetString("host", host);
+    kv.SetNum("port", port);
+    kv.SetString("key", key);
+    kv.Rewind();
+    kv.ExportToFile(path);
+    delete kv;
+}
+
+bool RemovePersistedRecipient(const char[] host, int port)
+{
+    char path[PLATFORM_MAX_PATH];
+    RecipientsPath(path, sizeof path);
+    KeyValues kv = new KeyValues("Recipients");
+    bool found = false;
+    if (kv.ImportFromFile(path))
+    {
+        char section[320];
+        Format(section, sizeof section, "%s:%d", host, port);
+        if (kv.JumpToKey(section))
+        {
+            kv.DeleteThis();
+            found = true;
+        }
+        kv.Rewind();
+        kv.ExportToFile(path);
+    }
+    delete kv;
+    return found;
+}
+
+void ClearPersistedRecipients()
+{
+    char path[PLATFORM_MAX_PATH];
+    RecipientsPath(path, sizeof path);
+    KeyValues kv = new KeyValues("Recipients");
+    kv.ExportToFile(path);
+    delete kv;
 }
 
 public Action OnGameLog(const char[] message)
