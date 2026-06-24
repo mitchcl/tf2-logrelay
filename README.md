@@ -1,11 +1,14 @@
-# tf2-logrelay
+# tf2-logrelay (UDP / HMAC)
 
-A SourceMod plugin that forwards a Source/TF2 server's gameplay log to an HTTPS endpoint of
-your choice — **without ever sending player IP addresses or chat**. A privacy-respecting,
-opt-in alternative to raw `logaddress_add`.
+A SourceMod plugin that blasts a Source/TF2 server's gameplay log over **UDP** to a host of your
+choice — like raw `logaddress`, but each packet is **authenticated with HMAC-SHA256** (shared
+secret) and **stripped of PII** first. A privacy-respecting, drop-in-ish alternative to
+`logaddress_add` that existing log ingesters (e.g. cheat feeds) can consume by adding a verify step.
 
-It only *reads* the server's game log (it never alters it), so logs.tf, SourceTV and normal
-logging are unaffected. Point it at any compatible receiver (the wire format is below).
+It only *reads* the server's game log (never alters it), so logs.tf, SourceTV and normal logging
+are unaffected.
+
+> The original HTTPS-POST variant is on the [`https`](https://github.com/mitchcl/tf2-logrelay/tree/https) branch.
 
 ## Privacy
 
@@ -15,84 +18,76 @@ By default (**comprehensive mode**) it forwards every gameplay log line **except
   IP can never leave the server (connection / rcon lines are the only ones that contain one).
 - **Chat** — `say` / `say_team` are dropped unless you set `logrelay_send_chat 1`.
 
-Set `logrelay_strict 1` to instead forward **only** an explicit gameplay whitelist (kills,
-damage, heals, ubers, caps, round/match events). The guards are `ContainsIPv4()` and
-`OnGameLog()` in [the source](addons/sourcemod/scripting/tf2_logrelay.sp) — audit them directly.
-Player identity in forwarded lines is SteamID + in-game name only (public scoreboard data). The
-server's own public `ip:port` is sent in a header for stream identification — that's the public
-game address, not player PII.
+Set `logrelay_strict 1` to instead forward **only** an explicit gameplay whitelist. Player
+identity in forwarded lines is SteamID + in-game name only (public scoreboard data). The guards
+are `ContainsIPv4()` and `OnGameLog()` in
+[the source](addons/sourcemod/scripting/tf2_logrelay.sp) — audit them directly.
 
 ## Requirements
 
 - SourceMod 1.11+
-- [SteamWorks](https://github.com/KyleSanderson/SteamWorks) extension
+- **Socket** extension (UDP transport)
+- **cURL** extension (native OpenSSL hashing for the HMAC — no SHA is implemented in pawn)
 - For full damage / accuracy / medic stats: SupStats2 + the logs.tf medic-stats plugin.
-  Without them you still get kills, caps and round/match events.
 
 ## Install
 
-1. Copy `addons/sourcemod/plugins/tf2_logrelay.smx` into your server's
-   `tf/addons/sourcemod/plugins/`.
+1. Copy `addons/sourcemod/plugins/tf2_logrelay.smx` into `tf/addons/sourcemod/plugins/`.
 2. Change map, or `sm plugins load tf2_logrelay`.
 3. Edit `tf/cfg/sourcemod/tf2_logrelay.cfg` (auto-generated on first run):
    ```
-   logrelay_url  "https://your-receiver.example/ingest"
-   logrelay_key  "<your shared secret>"
+   logrelay_host "your.receiver.host"
+   logrelay_port "8003"
+   logrelay_key  "<shared secret>"
    ```
-4. `sm plugins reload tf2_logrelay` (or change map). The plugin is inert until `logrelay_url`
-   is set, and it must be `https://`.
+4. `sm plugins reload tf2_logrelay` (or change map). Inert until `logrelay_host` + `logrelay_port` are set.
 
 ## ConVars
 
 | ConVar | Default | Purpose |
 | --- | --- | --- |
 | `logrelay_enabled` | `1` | Master on/off. |
-| `logrelay_url` | *(empty)* | HTTPS endpoint to POST batched lines to. Empty = inert. |
-| `logrelay_key` | *(empty)* | Sent as the `X-Api-Key` header. |
-| `logrelay_server_id` | *(empty)* | Sent as `X-Server-Id`; falls back to `hostname`. |
-| `logrelay_flush_interval` | `2.0` | Seconds between uploads. |
+| `logrelay_host` | *(empty)* | UDP host/IP to send to. Empty = inert. |
+| `logrelay_port` | `0` | UDP port to send to. |
+| `logrelay_key` | *(empty)* | Shared secret used as the HMAC-SHA256 key. |
+| `logrelay_server_id` | *(empty)* | Server id in each packet; falls back to the game port. |
 | `logrelay_strict` | `0` | `1` = whitelist only; `0` = everything except PII / chat. |
 | `logrelay_send_chat` | `0` | `1` = also forward chat. |
-| `logrelay_debug` | `0` | Log upload failures to the server console. |
+| `logrelay_debug` | `0` | Log socket/HMAC failures to the server console. |
 
-## Wire format (for building a receiver)
+## Packet format (for building a receiver)
 
-Each flush is a single `POST` to `logrelay_url` with `Content-Type: text/plain`, body =
-newline-delimited canonical log lines:
+One UDP datagram per log line:
 
 ```
-L 06/24/2026 - 21:00:00: "player<3><[U:1:1234]><Red>" killed "other<5><[U:1:5678]><Blue>" with "scattergun" (customkill "headshot")
-L 06/24/2026 - 21:00:01: World triggered "Round_Win" (winner "Red")
+<64-hex HMAC-SHA256><serverid>\x1f<hostname>\x1f<logline>
 ```
 
-Headers:
+- The first **64 chars** are `hex(HMAC_SHA256(logrelay_key, payload))`, where `payload` is
+  everything after them (`<serverid>\x1f<hostname>\x1f<logline>`). The key is the raw
+  `logrelay_key` string.
+- `0x1f` (unit separator) splits the fields; `serverid` is the server's `ip:port` (or `logrelay_server_id`),
+  `hostname` is the server's display name, and the line is plain HL-log text.
 
-| Header | Value |
-| --- | --- |
-| `X-Api-Key` | your shared secret (`logrelay_key`) |
-| `X-Server-Id` | stable per-server id (`logrelay_server_id` or `hostname`) |
-| `X-Server-Addr` | the server's public `ip:port` (when resolvable) |
+Receiver: take `mac = packet[:64]`, `payload = packet[64:]`, verify
+`HMAC_SHA256(key, payload) == mac` (constant-time), then split `payload` on `0x1f`. Key the
+stream by `serverid` (falling back to `senderIP + serverid`). Node reference:
 
-Your receiver should authenticate `X-Api-Key`, split the body on `\n`, and parse each line as a
-standard HL-log-standard line keyed by `X-Server-Id`. Respond `200` to acknowledge.
+```js
+const expected = crypto.createHmac('sha256', KEY).update(payload).digest('hex');
+```
+
+Existing logaddress tooling can consume the stream by stripping the 64-char tag + server-id field
+(and optionally verifying the HMAC).
 
 ## Build
 
 ```
 spcomp tf2_logrelay.sp
 ```
-with the SteamWorks include on the include path. A prebuilt `.smx` is in
-`addons/sourcemod/plugins/`.
-
-## Troubleshooting
-
-- **`Required extension "SteamWorks" file("SteamWorks.ext") not running`** / **`cannot open
-  shared object file`** — SteamWorks needs `libsteam_api.so` (32-bit) on the runtime library
-  path. On most setups srcds provides it; if not, ensure the server launches via `srcds_run`
-  (which puts `bin/` on `LD_LIBRARY_PATH`) or that `libsteam_api.so` is otherwise resolvable.
-- **Nothing arrives** — set `logrelay_debug 1`; the console then logs upload failures (auth,
-  TLS, network). Silence means the plugin isn't sending (check `logrelay_url`/`logrelay_key`
-  and that gameplay is actually happening).
+Minimal modern `logrelay_socket.inc` / `logrelay_curl.inc` are vendored next to the source because
+the upstream `socket.inc` uses the removed `funcenum` syntax (rejected by the SM 1.12 compiler).
+A prebuilt `.smx` is in `addons/sourcemod/plugins/`.
 
 ## License
 
