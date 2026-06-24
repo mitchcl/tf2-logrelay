@@ -1,0 +1,18 @@
+// Optional multi-recipient config. Copy to tf2_logrelay_recipients.cfg to enable.
+// Each entry is sent its own packet, HMAC'd with its own key — in ADDITION to the single
+// logrelay_host/port/key cvar recipient (if set). Use this for e.g. a casting org + tf2esports.
+"Recipients"
+{
+    "tf2esports"
+    {
+        "host"  "tf2esports.com"
+        "port"  "8003"
+        "key"   "your-tf2esports-key"
+    }
+    "casting-org"
+    {
+        "host"  "logs.castingorg.example"
+        "port"  "9001"
+        "key"   "your-casting-org-key"
+    }
+}

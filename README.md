@@ -55,6 +55,23 @@ are `ContainsIPv4()` and `OnGameLog()` in
 | `logrelay_send_chat` | `0` | `1` = also forward chat. |
 | `logrelay_debug` | `0` | Log socket/HMAC failures to the server console. |
 
+## Multiple recipients
+
+To send to more than one destination (e.g. a casting org **and** tf2esports), each with its own
+key, copy [`addons/sourcemod/configs/tf2_logrelay_recipients.cfg.example`](addons/sourcemod/configs/tf2_logrelay_recipients.cfg.example)
+to `tf2_logrelay_recipients.cfg`:
+
+```
+"Recipients"
+{
+    "tf2esports"  { "host" "tf2esports.com"          "port" "8003" "key" "key-a" }
+    "casting-org" { "host" "logs.castingorg.example" "port" "9001" "key" "key-b" }
+}
+```
+
+Each recipient gets its own packet, HMAC'd with its own key. These are sent **in addition** to the
+single `logrelay_host`/`logrelay_port`/`logrelay_key` cvar recipient, so you can use either or both.
+
 ## Packet format (for building a receiver)
 
 One UDP datagram per log line:

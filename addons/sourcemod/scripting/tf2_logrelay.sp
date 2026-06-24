@@ -17,6 +17,7 @@
 #define HMAC_BLOCK       64
 #define HMAC_HEXLEN      64
 #define SEP              0x1F
+#define MAX_RECIPIENTS   16
 
 public Plugin myinfo =
 {
@@ -40,6 +41,15 @@ ConVar g_cvHostip;
 ConVar g_cvHostname;
 
 Handle g_hSocket = null;
+
+enum struct Recipient
+{
+    char host[256];
+    int  port;
+    char key[129];
+}
+Recipient g_Recipients[MAX_RECIPIENTS];
+int g_RecipientCount = 0;
 
 // Only forwarded when logrelay_strict is 1.
 static const char g_Whitelist[][] =
@@ -94,12 +104,15 @@ public void OnPluginStart()
 // Announce the map once after the cfg has applied, so a source appears on an idle server too.
 public Action Timer_Startup(Handle timer)
 {
+    LoadRecipients();
+    LogMessage("[logrelay] %d recipient(s) configured", g_RecipientCount);
     AnnounceMap();
     return Plugin_Stop;
 }
 
 public void OnConfigsExecuted()
 {
+    LoadRecipients();
     AnnounceMap();
 }
 
@@ -125,11 +138,51 @@ public void OnSocketError(Handle socket, const int errorType, const int errorNum
 
 bool HaveTarget()
 {
-    if (!g_cvEnabled.BoolValue || g_hSocket == null)
-        return false;
-    char host[8];
+    return g_cvEnabled.BoolValue && g_hSocket != null && g_RecipientCount > 0;
+}
+
+// Recipients come from the single cvars (logrelay_host/port/key) plus, for multiple destinations
+// (e.g. a casting org + tf2esports), configs/tf2_logrelay_recipients.cfg — each with its own key.
+void LoadRecipients()
+{
+    g_RecipientCount = 0;
+
+    char host[256], key[129];
     g_cvHost.GetString(host, sizeof host);
-    return host[0] != '\0' && g_cvPort.IntValue > 0;
+    g_cvKey.GetString(key, sizeof key);
+    if (host[0] != '\0' && g_cvPort.IntValue > 0 && key[0] != '\0')
+        AddRecipient(host, g_cvPort.IntValue, key);
+
+    char path[PLATFORM_MAX_PATH];
+    BuildPath(Path_SM, path, sizeof path, "configs/tf2_logrelay_recipients.cfg");
+    if (!FileExists(path))
+        return;
+
+    KeyValues kv = new KeyValues("Recipients");
+    if (kv.ImportFromFile(path) && kv.GotoFirstSubKey())
+    {
+        do
+        {
+            char h[256], k[129];
+            kv.GetString("host", h, sizeof h);
+            kv.GetString("key", k, sizeof k);
+            int p = kv.GetNum("port");
+            if (h[0] != '\0' && p > 0 && k[0] != '\0')
+                AddRecipient(h, p, k);
+        }
+        while (kv.GotoNextKey());
+    }
+    delete kv;
+}
+
+void AddRecipient(const char[] host, int port, const char[] key)
+{
+    if (g_RecipientCount >= MAX_RECIPIENTS)
+        return;
+    strcopy(g_Recipients[g_RecipientCount].host, 256, host);
+    g_Recipients[g_RecipientCount].port = port;
+    strcopy(g_Recipients[g_RecipientCount].key, 129, key);
+    g_RecipientCount++;
 }
 
 public Action OnGameLog(const char[] message)
@@ -206,26 +259,24 @@ void SendLine(const char[] message)
     payload[plen++] = SEP;
     plen += strcopy(payload[plen], sizeof payload - plen, line);
 
-    char key[129];
-    g_cvKey.GetString(key, sizeof key);
-
-    char mac[HMAC_HEXLEN + 1];
-    if (!HmacSha256Hex(key, strlen(key), payload, plen, mac, sizeof mac))
+    // One packet per recipient — same payload, HMAC'd with each recipient's own key.
+    for (int r = 0; r < g_RecipientCount; r++)
     {
-        if (g_cvDebug.BoolValue)
-            LogError("[logrelay] HMAC failed");
-        return;
+        char mac[HMAC_HEXLEN + 1];
+        if (!HmacSha256Hex(g_Recipients[r].key, strlen(g_Recipients[r].key), payload, plen, mac, sizeof mac))
+        {
+            if (g_cvDebug.BoolValue)
+                LogError("[logrelay] HMAC failed for recipient %d", r);
+            continue;
+        }
+
+        char packet[HMAC_HEXLEN + MAX_PAYLOAD];
+        int pktlen = strcopy(packet, sizeof packet, mac);
+        for (int i = 0; i < plen; i++)
+            packet[pktlen++] = payload[i];
+
+        SocketSendTo(g_hSocket, packet, pktlen, g_Recipients[r].host, g_Recipients[r].port);
     }
-
-    char packet[HMAC_HEXLEN + MAX_PAYLOAD];
-    int pktlen = strcopy(packet, sizeof packet, mac);
-    for (int i = 0; i < plen; i++)
-        packet[pktlen++] = payload[i];
-    packet[pktlen] = '\0';
-
-    char host[256];
-    g_cvHost.GetString(host, sizeof host);
-    SocketSendTo(g_hSocket, packet, pktlen, host, g_cvPort.IntValue);
 }
 
 // HMAC(K,m) = H((K0 ^ opad) || H((K0 ^ ipad) || m)) via the native OpenSSL SHA-256.
