@@ -1,8 +1,6 @@
 # tf2-logrelay (UDP / HMAC-SHA256)
 
-The SourceMod plugin that streams live match stats to tf2esports.com. It blasts a Source/TF2
-server's gameplay log over **UDP** to one or more recipients — like raw `logaddress`, but each
-packet is **authenticated with HMAC-SHA256** (shared secret) and **stripped of PII** first.
+The SourceMod plugin that streams a Source/TF2 server's gameplay log over **UDP** to one or more recipients — like raw `logaddress`, but each packet is **authenticated with HMAC-SHA256** (shared secret) and **stripped of PII** first.
 
 It only *reads* the server's game log (never alters it), so logs.tf, SourceTV and normal logging
 are unaffected.
